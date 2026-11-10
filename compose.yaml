@@ -16,10 +16,13 @@ services:
       timeout: 3s
       retries: 20
 
-  # Cache em memória, sem persistência em disco e sem porta exposta.
+  # Redis do cache e da fila, sem porta exposta. Grava em disco (AOF) para não perder jobs
+  # da fila num reinício; o volume é apagado junto com os dados no `down -v`.
   cache:
     image: redis:8-alpine
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    command: ["redis-server", "--save", "", "--appendonly", "yes"]
+    volumes:
+      - dados-redis:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 3s
@@ -40,6 +43,8 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       REDIS_URL: redis://cache:6379
       CACHE_TTL_SEGUNDOS: ${CACHE_TTL_SEGUNDOS:-60}
+      FILA_TENTATIVAS: ${FILA_TENTATIVAS:-3}
+      FILA_ATRASO_MS: ${FILA_ATRASO_MS:-1000}
     ports:
       - "${API_PORT:-3000}:3000"
     healthcheck:
@@ -56,5 +61,29 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Consome a fila de conclusões. Mesma imagem da API, outro comando. Espera a API ficar
+  # saudável porque é ela que aplica as migrations.
+  worker:
+    build:
+      context: .
+      target: runtime
+    command: ["node", "src/worker.js"]
+    environment:
+      PGHOST: db
+      PGPORT: 5432
+      PGUSER: ${POSTGRES_USER:?defina POSTGRES_USER no .env}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}
+      PGDATABASE: ${POSTGRES_DB:?defina POSTGRES_DB no .env}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      REDIS_URL: redis://cache:6379
+      FILA_FALHAS_SIMULADAS: ${FILA_FALHAS_SIMULADAS:-0}
+    depends_on:
+      api:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   dados-postgres:
+  dados-redis:

@@ -5,7 +5,7 @@ const { emTransacao } = require('../db/transacao');
 const { validarEstado } = require('./regras');
 const { NaoEncontrada } = require('../http/erros');
 
-function criarServicoOrdens({ cache }) {
+function criarServicoOrdens({ cache, fila }) {
   async function criar(dados) {
     return repositorio.inserir(dados);
   }
@@ -28,19 +28,23 @@ function criarServicoOrdens({ cache }) {
   }
 
   // Lê a ordem travada, aplica só os campos enviados, valida o estado resultante e grava.
-  // O cache só é invalidado depois do COMMIT, para não ser repovoado com o estado antigo.
+  // Depois do COMMIT: invalida o cache (para não ser repovoado com o estado antigo) e, se a
+  // ordem acabou de ser concluída, publica a conclusão na fila para processamento assíncrono.
   async function atualizar(id, alteracoes) {
-    const ordem = await emTransacao(async (db) => {
+    const { anterior, ordem } = await emTransacao(async (db) => {
       const atual = await repositorio.buscarParaAtualizar(id, db);
       if (!atual) throw new NaoEncontrada();
 
       const resultante = { ...atual, ...alteracoes };
       validarEstado(resultante);
 
-      return repositorio.atualizar(id, resultante, db);
+      return { anterior: atual, ordem: await repositorio.atualizar(id, resultante, db) };
     });
 
     await cache.invalidar(id);
+    if (anterior.status !== 'concluida' && ordem.status === 'concluida') {
+      await fila.publicarConclusao(ordem);
+    }
     return ordem;
   }
 

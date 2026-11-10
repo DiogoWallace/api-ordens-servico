@@ -9,11 +9,15 @@
   },
   "scripts": {
     "start": "node src/server.js",
+    "worker": "node src/worker.js",
+    "fila:reprocessar": "node src/fila/reprocessar.js",
     "test": "node --test --test-concurrency=1 \"test/**/*.test.js\""
   },
   "dependencies": {
+    "bullmq": "6.7.3",
     "express": "5.3.0",
     "helmet": "8.3.0",
+    "ioredis": "6.0.0",
     "pg": "8.23.1",
     "pino": "10.4.0",
     "pino-http": "11.0.0",
