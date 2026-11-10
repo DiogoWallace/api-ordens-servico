@@ -17,6 +17,15 @@ services:
       timeout: 3s
       retries: 30
 
+  cache-test:
+    image: redis:8-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   tests:
     build:
       context: .
@@ -28,6 +37,9 @@ services:
       PGPASSWORD: ordens_test
       PGDATABASE: ordens_test
       LOG_LEVEL: silent
+      REDIS_URL: redis://cache-test:6379
     depends_on:
       db-test:
+        condition: service_healthy
+      cache-test:
         condition: service_healthy

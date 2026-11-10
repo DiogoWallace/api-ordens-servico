@@ -39,12 +39,38 @@ jobs:
         run: |
           set -euo pipefail
           corpo='{"titulo":"Inspeção da válvula VLV-OS-73A","descricao":"Verificar vedação e registrar o resultado da inspeção."}'
-          criada=$(curl -fsS --retry 15 --retry-connrefused --retry-delay 1 \
+          criada=$(curl -fsS --retry 15 --retry-all-errors --retry-delay 1 \
             -H 'Content-Type: application/json' -d "$corpo" http://localhost:3000/ordens)
           echo "$criada"
           id=$(jq -r .id <<<"$criada")
           curl -fsS "http://localhost:3000/ordens/$id" \
             | jq -e --arg id "$id" '.id == $id and .status == "aberta" and .solucao == null'
+
+      - name: Cache - segunda leitura vem do cache e a alteração invalida
+        run: |
+          set -euo pipefail
+          cache() { curl -fsS -o /dev/null -D - "$1" | tr -d '\r' | awk -F': ' 'tolower($1)=="x-cache"{print $2}'; }
+          id=$(curl -fsS http://localhost:3000/ordens | jq -r '.[0].id')
+          url="http://localhost:3000/ordens/$id"
+          test "$(cache "$url")" = HIT
+          curl -fsS -X PATCH -H 'Content-Type: application/json' -d '{"status":"em_andamento"}' "$url" >/dev/null
+          test "$(cache "$url")" = MISS
+          curl -fsS "$url" | jq -e '.status == "em_andamento"'
+          test "$(cache "$url")" = HIT
+
+      - name: Fila - a conclusão é registrada pelo worker
+        run: |
+          set -euo pipefail
+          id=$(curl -fsS http://localhost:3000/ordens | jq -r '.[0].id')
+          curl -fsS -X PATCH -H 'Content-Type: application/json' \
+            -d '{"status":"concluida","solucao":"Vedação substituída."}' "http://localhost:3000/ordens/$id" >/dev/null
+          for _ in $(seq 1 20); do
+            n=$(docker compose exec -T db psql -U ordens -d ordens -tAc \
+              "SELECT count(*) FROM conclusoes_registradas WHERE ordem_id = '$id'")
+            [ "$n" = 1 ] && exit 0
+            sleep 1
+          done
+          echo "a conclusão não foi registrada pelo worker"; exit 1
 
       - name: Logs
         if: failure()

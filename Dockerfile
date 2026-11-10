@@ -12,6 +12,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 # Imagem dos testes: inclui as dependências de desenvolvimento.
 FROM base AS test
 RUN npm ci && npm cache clean --force
+COPY openapi.yaml ./
 COPY src ./src
 COPY test ./test
 USER node
@@ -21,6 +22,7 @@ CMD ["npm", "test"]
 FROM base AS runtime
 ENV NODE_ENV=production
 COPY --from=deps /app/node_modules ./node_modules
+COPY openapi.yaml ./
 COPY src ./src
 USER node
 EXPOSE 3000
