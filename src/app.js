@@ -4,10 +4,11 @@ const { randomUUID } = require('node:crypto');
 const express = require('express');
 const helmet = require('helmet');
 const pinoHttp = require('pino-http');
-const { ordensRouter } = require('./ordens/ordens.routes');
+const { criarOrdensRouter } = require('./ordens/ordens.routes');
+const { criarServicoOrdens } = require('./ordens/ordens.service');
 const { errorHandler, rotaInexistente } = require('./http/errorHandler');
 
-function criarApp({ logger }) {
+function criarApp({ logger, cache }) {
   const app = express();
 
   app.use(
@@ -28,7 +29,7 @@ function criarApp({ logger }) {
   app.use(helmet());
   app.use(express.json({ limit: '10kb' }));
 
-  app.use('/ordens', ordensRouter);
+  app.use('/ordens', criarOrdensRouter(criarServicoOrdens({ cache })));
 
   app.use(rotaInexistente);
   app.use(errorHandler);

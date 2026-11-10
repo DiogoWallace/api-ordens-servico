@@ -16,6 +16,16 @@ services:
       timeout: 3s
       retries: 20
 
+  # Cache em memória, sem persistência em disco e sem porta exposta.
+  cache:
+    image: redis:8-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
   api:
     build:
       context: .
@@ -28,10 +38,21 @@ services:
       PGPASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}
       PGDATABASE: ${POSTGRES_DB:?defina POSTGRES_DB no .env}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      REDIS_URL: redis://cache:6379
+      CACHE_TTL_SEGUNDOS: ${CACHE_TTL_SEGUNDOS:-60}
     ports:
       - "${API_PORT:-3000}:3000"
+    healthcheck:
+      # A API só abre a porta depois de aplicar as migrations: porta aceitando conexão = API pronta.
+      test: ["CMD", "node", "-e", "require('net').connect(3000, '127.0.0.1').on('connect', () => process.exit(0)).on('error', () => process.exit(1))"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
     depends_on:
       db:
+        condition: service_healthy
+      cache:
         condition: service_healthy
     restart: unless-stopped
 
