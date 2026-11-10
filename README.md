@@ -1,7 +1,8 @@
 # API de ordens de serviço
 
 API RESTful em Node.js e Express para cadastrar, consultar, atualizar e excluir ordens de serviço,
-com persistência em PostgreSQL. Tudo roda em Docker: não é preciso instalar Node.js nem PostgreSQL.
+com persistência em PostgreSQL e cache em Redis. Tudo roda em Docker: não é preciso instalar Node.js,
+PostgreSQL nem Redis.
 
 - [Pré-requisitos](#pré-requisitos)
 - [Configuração](#configuração)
@@ -9,6 +10,7 @@ com persistência em PostgreSQL. Tudo roda em Docker: não é preciso instalar N
 - [Testes](#testes)
 - [Contrato da API](#contrato-da-api)
 - [Exemplos de requisição e resposta](#exemplos-de-requisição-e-resposta)
+- [Cache](#cache)
 - [Escolha do banco: PostgreSQL](#escolha-do-banco-postgresql)
 - [Decisões técnicas](#decisões-técnicas)
 - [Estrutura do projeto](#estrutura-do-projeto)
@@ -37,6 +39,7 @@ cp .env.example .env
 | `POSTGRES_PASSWORD` | Senha do PostgreSQL. **Troque o valor de exemplo.** | `troque-esta-senha` |
 | `POSTGRES_DB` | Nome do banco | `ordens` |
 | `LOG_LEVEL` | Nível de log da API (`fatal`, `error`, `warn`, `info`, `debug`, `trace`, `silent`) | `info` |
+| `CACHE_TTL_SEGUNDOS` | Tempo de vida de uma ordem no cache de `GET /ordens/:id` | `60` |
 
 Sem o `.env`, o Compose para antes de subir e informa qual variável falta.
 
@@ -46,8 +49,8 @@ Sem o `.env`, o Compose para antes de subir e informa qual variável falta.
 docker compose up --build
 ```
 
-O Compose sobe o PostgreSQL, espera o banco ficar saudável e inicia a API, que aplica as migrations
-pendentes antes de aceitar requisições. A API fica em `http://localhost:3000` (ou na porta definida
+O Compose sobe o PostgreSQL e o Redis, espera os dois ficarem saudáveis e inicia a API, que aplica
+as migrations pendentes antes de aceitar requisições. A API fica em `http://localhost:3000` (ou na porta definida
 em `API_PORT`). Para rodar em segundo plano, use `docker compose up --build -d`.
 
 Para encerrar:
@@ -59,8 +62,9 @@ docker compose down -v   # para os containers e apaga o volume do banco
 
 ## Testes
 
-Os testes exercitam as rotas HTTP contra um PostgreSQL de teste isolado: outro projeto do Compose,
-com o banco em memória (`tmpfs`), descartado ao final. O banco de desenvolvimento não é tocado.
+Os testes exercitam as rotas HTTP contra um PostgreSQL e um Redis de teste isolados: outro projeto
+do Compose, com o banco em memória (`tmpfs`), descartado ao final. O ambiente de desenvolvimento não é
+tocado.
 
 ```bash
 docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from tests
@@ -81,10 +85,14 @@ A suíte (`node:test` + `supertest`) cobre:
   mesmo `PATCH` ou gravada antes; tentativa de apagar a solução de uma ordem concluída; reabertura;
 - as constraints do banco diretamente em SQL, e a resposta 400 quando uma delas barra a gravação;
 - resposta 500 genérica, sem stack nem detalhes internos;
+- o cache: MISS seguido de HIT sem consultar o banco, tempo de vida, invalidação após `PATCH` e
+  `DELETE`, `PATCH` rejeitado sem efeito no cache, 404 não cacheado e funcionamento com o Redis
+  indisponível;
 - testes unitários da regra de conclusão.
 
 A CI (GitHub Actions) roda a mesma suíte e um smoke test do `compose.yaml` a partir de um clone limpo:
-copia o `.env.example`, sobe a stack, cria uma ordem e a consulta pelo ID retornado.
+copia o `.env.example`, sobe a stack, cria uma ordem, a consulta pelo ID retornado e confere o HIT e a
+invalidação do cache.
 
 ## Contrato da API
 
@@ -121,7 +129,8 @@ copia o `.env.example`, sobe a stack, cria uma ordem e a consulta pelo ID retorn
 | `ROTA_INEXISTENTE` | 404 | Rota não existe |
 | `ERRO_INTERNO` | 500 | Erro inesperado; o detalhe fica só no log do servidor |
 
-Toda resposta traz o header `X-Request-Id`, o mesmo registrado no log da requisição.
+Toda resposta traz o header `X-Request-Id`, o mesmo registrado no log da requisição. `GET /ordens/:id`
+traz também `X-Cache: HIT` ou `X-Cache: MISS` (veja [Cache](#cache)).
 
 ## Exemplos de requisição e resposta
 
@@ -287,6 +296,42 @@ curl -i -X DELETE http://localhost:3000/ordens/612f32fc-9c29-43d4-b796-889aeae47
 
 `204 No Content`, sem corpo. Uma nova consulta ou exclusão do mesmo ID responde `404`.
 
+## Cache
+
+`GET /ordens/:id` usa cache em Redis no padrão cache-aside:
+
+- **MISS:** a ordem não está no cache; a API lê do banco, grava no cache por `CACHE_TTL_SEGUNDOS` e
+  responde com `X-Cache: MISS`.
+- **HIT:** a ordem está no cache; a API responde sem consultar o banco, com `X-Cache: HIT`.
+- **Invalidação:** `PATCH` e `DELETE` removem a ordem do cache depois do `COMMIT`. A leitura seguinte é
+  um MISS e traz o dado atualizado (ou 404, depois da exclusão). Um `PATCH` rejeitado não mexe no cache.
+- Ordem inexistente (404) não é cacheada. A listagem `GET /ordens` não usa cache.
+
+### Demonstração
+
+Com a API no ar e uma ordem criada (troque `$ID` pelo ID retornado no `POST`):
+
+```bash
+curl -s -o /dev/null -D - http://localhost:3000/ordens/$ID | grep -i x-cache   # X-Cache: MISS
+curl -s -o /dev/null -D - http://localhost:3000/ordens/$ID | grep -i x-cache   # X-Cache: HIT
+
+curl -s -X PATCH http://localhost:3000/ordens/$ID \
+  -H 'Content-Type: application/json' -d '{"status":"em_andamento"}' > /dev/null
+
+curl -s -D - http://localhost:3000/ordens/$ID | grep -i -e x-cache -e em_andamento
+# X-Cache: MISS, já com "status":"em_andamento"
+curl -s -o /dev/null -D - http://localhost:3000/ordens/$ID | grep -i x-cache   # X-Cache: HIT
+
+curl -s -o /dev/null -X DELETE http://localhost:3000/ordens/$ID
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:3000/ordens/$ID         # 404
+```
+
+Para ver a chave e o tempo de vida direto no Redis:
+
+```bash
+docker compose exec cache redis-cli TTL ordem:$ID
+```
+
 ## Escolha do banco: PostgreSQL
 
 - **O domínio é relacional e de esquema fixo.** Uma ordem tem campos conhecidos e tipados, e não há
@@ -364,6 +409,18 @@ mantém a criação do banco dentro do `docker compose up`, sem passo manual. O 
 usa TCP: durante a inicialização, o servidor temporário do container aceita só conexões locais por
 socket, e um healthcheck por socket liberaria a API cedo demais.
 
+**Cache.** Redis com cliente `redis`, injetado no serviço de ordens (`criarApp({ logger, cache })`).
+
+- O cache só é invalidado **depois do `COMMIT`**. Invalidar dentro da transação abriria uma janela em
+  que uma leitura concorrente repovoaria o cache com o estado ainda não alterado.
+- Invalidar em vez de regravar mantém um único caminho de escrita no cache (a leitura) e não grava
+  ordens que talvez nunca sejam lidas.
+- **O Redis é opcional para a disponibilidade.** Sem `REDIS_URL`, a API roda sem cache. Com o Redis
+  fora do ar, a leitura vira MISS e a gravação e a invalidação só são registradas no log: o cliente
+  roda sem fila offline, então os comandos falham na hora em vez de segurar a requisição, e o log
+  registra só as mudanças de estado da conexão.
+- O Redis roda sem persistência em disco e sem porta exposta: é só um cache.
+
 **Docker.** `Dockerfile` multi-stage: um estágio instala as dependências de produção com `npm ci` a
 partir do `package-lock.json`, outro monta a imagem de testes, e o estágio final contém só o código e
 as dependências de produção.
@@ -373,9 +430,11 @@ as dependências de produção.
 ```
 src/
 ├── app.js                 # monta o Express: log, helmet, JSON, rotas, 404 e tratador de erros
-├── server.js              # aplica migrations, sobe o servidor e trata SIGTERM/SIGINT
+├── server.js              # aplica migrations, cria o cache, sobe o servidor e trata SIGTERM/SIGINT
 ├── config.js              # valida as variáveis de ambiente
 ├── logger.js
+├── cache/
+│   └── cache.js           # cache-aside no Redis, com fallback quando o Redis está fora
 ├── db/
 │   ├── pool.js            # pool do pg (lê PGHOST, PGUSER, PGPASSWORD, PGDATABASE)
 │   ├── transacao.js       # BEGIN/COMMIT/ROLLBACK
@@ -394,6 +453,7 @@ src/
 test/
 ├── helpers.js
 ├── ordens.http.test.js
+├── cache.test.js
 └── regras.test.js
 ```
 
@@ -409,6 +469,11 @@ test/
 - **Migrations só para frente**, sem rollback automático, e pensadas para uma única instância da API
   aplicando-as na inicialização.
 - **`atualizado_em` muda a cada `PATCH` aceito**, mesmo que os valores enviados sejam iguais aos atuais.
+- **Cache com consistência eventual em corridas raras.** Se uma leitura buscar a ordem no banco antes de
+  um `PATCH` concorrente e gravar no cache depois da invalidação, o cache guarda o estado anterior até o
+  TTL expirar (60 s por padrão). O mesmo vale se a invalidação falhar porque o Redis caiu naquele
+  instante.
+- **Redis sem senha**, acessível só pela rede interna do Compose.
 - **Credenciais do banco de teste fixas** em `compose.test.yaml`. O banco é efêmero, fica em memória e
   não expõe porta.
 

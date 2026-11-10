@@ -46,6 +46,18 @@ jobs:
           curl -fsS "http://localhost:3000/ordens/$id" \
             | jq -e --arg id "$id" '.id == $id and .status == "aberta" and .solucao == null'
 
+      - name: Cache - segunda leitura vem do cache e a alteração invalida
+        run: |
+          set -euo pipefail
+          cache() { curl -fsS -o /dev/null -D - "$1" | tr -d '\r' | awk -F': ' 'tolower($1)=="x-cache"{print $2}'; }
+          id=$(curl -fsS http://localhost:3000/ordens | jq -r '.[0].id')
+          url="http://localhost:3000/ordens/$id"
+          test "$(cache "$url")" = HIT
+          curl -fsS -X PATCH -H 'Content-Type: application/json' -d '{"status":"em_andamento"}' "$url" >/dev/null
+          test "$(cache "$url")" = MISS
+          curl -fsS "$url" | jq -e '.status == "em_andamento"'
+          test "$(cache "$url")" = HIT
+
       - name: Logs
         if: failure()
         run: docker compose logs
