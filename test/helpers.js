@@ -28,4 +28,4 @@ async function encerrarBanco() {
   await pool.end();
 }
 
-module.exports = { app, prepararBanco, limparBanco, encerrarBanco };
+module.exports = { app, pool, prepararBanco, limparBanco, encerrarBanco };
