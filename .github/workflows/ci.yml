@@ -39,7 +39,7 @@ jobs:
         run: |
           set -euo pipefail
           corpo='{"titulo":"Inspeção da válvula VLV-OS-73A","descricao":"Verificar vedação e registrar o resultado da inspeção."}'
-          criada=$(curl -fsS --retry 15 --retry-connrefused --retry-delay 1 \
+          criada=$(curl -fsS --retry 15 --retry-all-errors --retry-delay 1 \
             -H 'Content-Type: application/json' -d "$corpo" http://localhost:3000/ordens)
           echo "$criada"
           id=$(jq -r .id <<<"$criada")

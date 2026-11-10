@@ -51,7 +51,9 @@ docker compose up --build
 
 O Compose sobe o PostgreSQL e o Redis, espera os dois ficarem saudáveis e inicia a API, que aplica
 as migrations pendentes antes de aceitar requisições. A API fica em `http://localhost:3000` (ou na porta definida
-em `API_PORT`). Para rodar em segundo plano, use `docker compose up --build -d`.
+em `API_PORT`). Para rodar em segundo plano, use `docker compose up --build -d --wait`: o comando
+só termina quando banco, cache e API estão saudáveis (o healthcheck da API confirma que ela já aceita
+conexões, o que só acontece depois das migrations).
 
 Para encerrar:
 
