@@ -1,0 +1,268 @@
+openapi: 3.1.0
+info:
+  title: API de ordens de serviço
+  version: 1.0.0
+  description: |
+    Cadastro, consulta, atualização e exclusão de ordens de serviço.
+
+    - Toda ordem nasce `aberta`. Só pode ficar `concluida` com `solucao` preenchida; a regra vale
+      para o estado resultante do `PATCH` (estado atual + campos enviados).
+    - Campos fora do contrato são rejeitados com 400.
+    - `GET /ordens/{id}` usa cache: o header `X-Cache` informa `HIT` ou `MISS`.
+    - Concluir uma ordem publica um job de processamento assíncrono (fila).
+servers:
+  - url: /
+    description: Mesma origem desta documentação
+
+tags:
+  - name: Ordens
+
+paths:
+  /ordens:
+    post:
+      tags: [Ordens]
+      summary: Cria uma ordem
+      operationId: criarOrdem
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NovaOrdem' }
+            example:
+              titulo: Inspeção da válvula VLV-OS-73A
+              descricao: Verificar vedação e registrar o resultado da inspeção.
+      responses:
+        '201':
+          description: Ordem criada
+          headers:
+            Location:
+              description: Caminho da ordem criada
+              schema: { type: string, example: /ordens/612f32fc-9c29-43d4-b796-889aeae479a3 }
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Ordem' }
+        '400': { $ref: '#/components/responses/EntradaInvalida' }
+
+    get:
+      tags: [Ordens]
+      summary: Lista as ordens
+      description: Todas as ordens, em ordem de criação. Retorna `[]` quando não há nenhuma.
+      operationId: listarOrdens
+      responses:
+        '200':
+          description: Lista de ordens
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Ordem' }
+
+  /ordens/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+
+    get:
+      tags: [Ordens]
+      summary: Consulta uma ordem
+      operationId: obterOrdem
+      responses:
+        '200':
+          description: Ordem encontrada
+          headers:
+            X-Cache:
+              description: '`HIT` quando a ordem veio do cache; `MISS` quando veio do banco.'
+              schema: { type: string, enum: [HIT, MISS] }
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Ordem' }
+        '400': { $ref: '#/components/responses/IdInvalido' }
+        '404': { $ref: '#/components/responses/NaoEncontrada' }
+
+    patch:
+      tags: [Ordens]
+      summary: Atualiza campos de uma ordem
+      description: |
+        Envie ao menos um campo. A regra de conclusão é avaliada sobre o estado resultante:
+        concluir exige `solucao` com conteúdo, enviada no mesmo `PATCH` ou gravada antes.
+        Enviar `solucao: ""` remove a solução (só se a ordem não ficar `concluida`).
+        Uma ordem concluída pode ser reaberta.
+      operationId: atualizarOrdem
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AtualizacaoOrdem' }
+            examples:
+              andamento:
+                summary: Mudar o status
+                value: { status: em_andamento }
+              concluir:
+                summary: Concluir com solução
+                value:
+                  status: concluida
+                  solucao: Vedação substituída e teste de estanqueidade aprovado.
+      responses:
+        '200':
+          description: Ordem atualizada
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Ordem' }
+        '400':
+          description: Entrada inválida, ID malformado ou violação da regra de conclusão
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Erro' }
+              examples:
+                regraConclusao:
+                  summary: Concluir sem solução
+                  value:
+                    erro:
+                      codigo: REGRA_CONCLUSAO
+                      mensagem: Uma ordem só pode ser concluída com uma solução preenchida.
+                      detalhes: [{ campo: solucao, problema: obrigatória para concluir a ordem }]
+                entradaInvalida:
+                  summary: Campos inválidos
+                  value:
+                    erro:
+                      codigo: ENTRADA_INVALIDA
+                      mensagem: Entrada inválida.
+                      detalhes:
+                        - { campo: status, problema: 'deve ser um destes valores: aberta, em_andamento, concluida' }
+                        - { campo: prioridade, problema: campo não permitido }
+        '404': { $ref: '#/components/responses/NaoEncontrada' }
+
+    delete:
+      tags: [Ordens]
+      summary: Exclui uma ordem
+      operationId: excluirOrdem
+      responses:
+        '204':
+          description: Ordem excluída, sem corpo
+        '400': { $ref: '#/components/responses/IdInvalido' }
+        '404': { $ref: '#/components/responses/NaoEncontrada' }
+
+components:
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      description: ID da ordem (UUID)
+      schema: { type: string, format: uuid }
+
+  headers:
+    XRequestId:
+      description: Identificador da requisição, o mesmo registrado no log
+      schema: { type: string, format: uuid }
+
+  schemas:
+    Status:
+      type: string
+      enum: [aberta, em_andamento, concluida]
+
+    Ordem:
+      type: object
+      required: [id, titulo, descricao, status, solucao, criado_em, atualizado_em]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        titulo: { type: string, minLength: 1 }
+        descricao: { type: string, minLength: 1 }
+        status: { $ref: '#/components/schemas/Status' }
+        solucao:
+          type: [string, 'null']
+          description: '`null` quando não há solução'
+        criado_em: { type: string, format: date-time, readOnly: true }
+        atualizado_em: { type: string, format: date-time, readOnly: true }
+      example:
+        id: 612f32fc-9c29-43d4-b796-889aeae479a3
+        titulo: Inspeção da válvula VLV-OS-73A
+        descricao: Verificar vedação e registrar o resultado da inspeção.
+        status: aberta
+        solucao: null
+        criado_em: '2026-11-10T15:19:53.002Z'
+        atualizado_em: '2026-11-10T15:19:53.002Z'
+
+    NovaOrdem:
+      type: object
+      additionalProperties: false
+      required: [titulo, descricao]
+      properties:
+        titulo:
+          type: string
+          description: Gravado sem os espaços das extremidades; não pode ficar vazio.
+        descricao:
+          type: string
+          description: Gravada sem os espaços das extremidades; não pode ficar vazia.
+
+    AtualizacaoOrdem:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        titulo: { type: string, description: Não pode ficar vazio após o trim. }
+        descricao: { type: string, description: Não pode ficar vazia após o trim. }
+        status: { $ref: '#/components/schemas/Status' }
+        solucao:
+          type: string
+          description: Texto; `null` é rejeitado. Vazia após o trim, remove a solução.
+
+    Erro:
+      type: object
+      required: [erro]
+      properties:
+        erro:
+          type: object
+          required: [codigo, mensagem, detalhes]
+          properties:
+            codigo:
+              type: string
+              enum: [ENTRADA_INVALIDA, REGRA_CONCLUSAO, NAO_ENCONTRADA, ROTA_INEXISTENTE, ERRO_INTERNO]
+            mensagem: { type: string }
+            detalhes:
+              type: array
+              items:
+                type: object
+                required: [campo, problema]
+                properties:
+                  campo: { type: string }
+                  problema: { type: string }
+
+  responses:
+    EntradaInvalida:
+      description: Entrada inválida ou campo fora do contrato
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Erro' }
+          example:
+            erro:
+              codigo: ENTRADA_INVALIDA
+              mensagem: Entrada inválida.
+              detalhes:
+                - { campo: titulo, problema: não pode ficar vazio }
+                - { campo: status, problema: campo não permitido }
+    IdInvalido:
+      description: ID malformado
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Erro' }
+          example:
+            erro:
+              codigo: ENTRADA_INVALIDA
+              mensagem: Entrada inválida.
+              detalhes: [{ campo: id, problema: deve ser um UUID válido }]
+    NaoEncontrada:
+      description: ID válido sem ordem correspondente
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Erro' }
+          example:
+            erro:
+              codigo: NAO_ENCONTRADA
+              mensagem: Ordem de serviço não encontrada.
+              detalhes: []

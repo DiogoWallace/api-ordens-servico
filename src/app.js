@@ -7,6 +7,7 @@ const pinoHttp = require('pino-http');
 const { criarOrdensRouter } = require('./ordens/ordens.routes');
 const { criarServicoOrdens } = require('./ordens/ordens.service');
 const { errorHandler, rotaInexistente } = require('./http/errorHandler');
+const { criarRotasDocs } = require('./http/docs');
 
 function criarApp({ logger, cache, fila }) {
   const app = express();
@@ -26,9 +27,16 @@ function criarApp({ logger, cache, fila }) {
       },
     }),
   );
-  app.use(helmet());
+  app.use(
+    helmet({
+      // Sem upgrade-insecure-requests: a API roda em HTTP local, e a diretiva faria o navegador
+      // pedir os arquivos do Swagger UI por HTTPS.
+      contentSecurityPolicy: { directives: { upgradeInsecureRequests: null } },
+    }),
+  );
   app.use(express.json({ limit: '10kb' }));
 
+  app.use(criarRotasDocs());
   app.use('/ordens', criarOrdensRouter(criarServicoOrdens({ cache, fila })));
 
   app.use(rotaInexistente);
