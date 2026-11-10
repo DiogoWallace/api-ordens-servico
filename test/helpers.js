@@ -4,12 +4,15 @@ const { createClient } = require('redis');
 const { pool } = require('../src/db/pool');
 const { migrar } = require('../src/db/migrate');
 const { criarCache } = require('../src/cache/cache');
+const { criarFila } = require('../src/fila/fila');
 const { criarApp } = require('../src/app');
 const { criarLogger } = require('../src/logger');
 
 const logger = criarLogger('silent');
 const cache = criarCache({ url: process.env.REDIS_URL, ttlSegundos: 60, logger });
-const app = criarApp({ logger, cache });
+// Backoff curto para os testes de novas tentativas não demorarem.
+const fila = criarFila({ url: process.env.REDIS_URL, tentativas: 3, atrasoMs: 10, logger });
+const app = criarApp({ logger, cache, fila });
 
 // Conexão própria dos testes com o Redis, para limpar e inspecionar o cache.
 const redis = process.env.REDIS_URL ? createClient({ url: process.env.REDIS_URL }) : null;
@@ -25,6 +28,7 @@ async function prepararBanco() {
   exigirBancoDeTeste();
   await migrar(logger);
   if (redis) await redis.connect();
+  if (fila.queue) await fila.queue.waitUntilReady();
   await esperarCache();
 }
 
@@ -40,12 +44,12 @@ async function esperarCache() {
 }
 
 async function limparBanco() {
-  await pool.query('TRUNCATE ordens');
+  await pool.query('TRUNCATE ordens, conclusoes_registradas');
   if (redis) await redis.flushDb();
 }
 
 async function encerrarBanco() {
-  await Promise.all([pool.end(), cache.fechar(), redis?.close()]);
+  await Promise.all([pool.end(), cache.fechar(), fila.fechar(), redis?.close()]);
 }
 
-module.exports = { app, pool, redis, prepararBanco, limparBanco, encerrarBanco };
+module.exports = { app, pool, redis, fila, logger, prepararBanco, limparBanco, encerrarBanco };

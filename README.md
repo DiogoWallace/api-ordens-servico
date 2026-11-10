@@ -1,8 +1,8 @@
 # API de ordens de serviço
 
 API RESTful em Node.js e Express para cadastrar, consultar, atualizar e excluir ordens de serviço,
-com persistência em PostgreSQL e cache em Redis. Tudo roda em Docker: não é preciso instalar Node.js,
-PostgreSQL nem Redis.
+com persistência em PostgreSQL, cache em Redis e uma fila (BullMQ) que processa as conclusões de forma
+assíncrona. Tudo roda em Docker: não é preciso instalar Node.js, PostgreSQL nem Redis.
 
 - [Pré-requisitos](#pré-requisitos)
 - [Configuração](#configuração)
@@ -11,6 +11,7 @@ PostgreSQL nem Redis.
 - [Contrato da API](#contrato-da-api)
 - [Exemplos de requisição e resposta](#exemplos-de-requisição-e-resposta)
 - [Cache](#cache)
+- [Fila](#fila)
 - [Escolha do banco: PostgreSQL](#escolha-do-banco-postgresql)
 - [Decisões técnicas](#decisões-técnicas)
 - [Estrutura do projeto](#estrutura-do-projeto)
@@ -40,6 +41,9 @@ cp .env.example .env
 | `POSTGRES_DB` | Nome do banco | `ordens` |
 | `LOG_LEVEL` | Nível de log da API (`fatal`, `error`, `warn`, `info`, `debug`, `trace`, `silent`) | `info` |
 | `CACHE_TTL_SEGUNDOS` | Tempo de vida de uma ordem no cache de `GET /ordens/:id` | `60` |
+| `FILA_TENTATIVAS` | Tentativas de cada job da fila antes de ficar como falho | `3` |
+| `FILA_ATRASO_MS` | Atraso base, em ms, do backoff exponencial entre tentativas | `1000` |
+| `FILA_FALHAS_SIMULADAS` | Demonstração: quantas tentativas de cada job o worker faz falhar de propósito | `0` |
 
 Sem o `.env`, o Compose para antes de subir e informa qual variável falta.
 
@@ -50,7 +54,7 @@ docker compose up --build
 ```
 
 O Compose sobe o PostgreSQL e o Redis, espera os dois ficarem saudáveis e inicia a API, que aplica
-as migrations pendentes antes de aceitar requisições. A API fica em `http://localhost:3000` (ou na porta definida
+as migrations pendentes antes de aceitar requisições. Com a API saudável, sobe o worker da fila. A API fica em `http://localhost:3000` (ou na porta definida
 em `API_PORT`). Para rodar em segundo plano, use `docker compose up --build -d --wait`: o comando
 só termina quando banco, cache e API estão saudáveis (o healthcheck da API confirma que ela já aceita
 conexões, o que só acontece depois das migrations).
@@ -90,11 +94,14 @@ A suíte (`node:test` + `supertest`) cobre:
 - o cache: MISS seguido de HIT sem consultar o banco, tempo de vida, invalidação após `PATCH` e
   `DELETE`, `PATCH` rejeitado sem efeito no cache, 404 não cacheado e funcionamento com o Redis
   indisponível;
+- a fila: publicação só quando a ordem passa a `concluida`, processamento pelo worker fora da
+  requisição, novas tentativas até concluir na terceira, job que esgota as tentativas reprocessado com
+  sucesso e publicação que não derruba a requisição com o Redis indisponível;
 - testes unitários da regra de conclusão.
 
 A CI (GitHub Actions) roda a mesma suíte e um smoke test do `compose.yaml` a partir de um clone limpo:
-copia o `.env.example`, sobe a stack, cria uma ordem, a consulta pelo ID retornado e confere o HIT e a
-invalidação do cache.
+copia o `.env.example`, sobe a stack, cria uma ordem, a consulta pelo ID retornado, confere o HIT e a
+invalidação do cache e espera o worker registrar a conclusão da ordem.
 
 ## Contrato da API
 
@@ -334,6 +341,78 @@ Para ver a chave e o tempo de vida direto no Redis:
 docker compose exec cache redis-cli TTL ordem:$ID
 ```
 
+## Fila
+
+Quando uma ordem **passa a `concluida`**, a API publica o job `registrar-conclusao` numa fila BullMQ
+(no mesmo Redis) e responde sem esperar o processamento. O worker, um processo separado (serviço
+`worker` no Compose), consome a fila e grava o registro da conclusão na tabela
+`conclusoes_registradas`.
+
+- **Assíncrono:** a publicação acontece depois do `COMMIT`; o registro é gravado pelo worker, fora da
+  requisição.
+- **Novas tentativas:** cada job tem `FILA_TENTATIVAS` tentativas (3), com backoff exponencial a partir
+  de `FILA_ATRASO_MS` (1 s, 2 s…).
+- **Reprocessamento:** o job que esgota as tentativas fica guardado como falho; o comando
+  `node src/fila/reprocessar.js` o devolve à fila com a contagem de tentativas zerada.
+- **Idempotência:** o ID do job é derivado da ordem e do instante da conclusão, e o registro usa o ID
+  do job como chave. Reprocessar ou receber o mesmo job duas vezes não duplica o registro.
+- Alterar uma ordem que já está concluída não publica outra conclusão. Reabrir e concluir de novo
+  publica.
+
+Para demonstrar as falhas, `FILA_FALHAS_SIMULADAS=N` faz o worker falhar de propósito nas N primeiras
+tentativas de cada job.
+
+### Demonstração
+
+Com a stack no ar (`docker compose up --build -d --wait`), crie e conclua uma ordem:
+
+```bash
+concluir() {
+  ID=$(curl -s -X POST http://localhost:3000/ordens -H 'Content-Type: application/json' \
+    -d '{"titulo":"Inspeção da válvula VLV-OS-73A","descricao":"Verificar vedação e registrar o resultado da inspeção."}' \
+    | sed -E 's/.*"id":"([^"]+)".*/\1/')
+  curl -s -o /dev/null -w "PATCH %{http_code}\n" -X PATCH http://localhost:3000/ordens/$ID \
+    -H 'Content-Type: application/json' -d '{"status":"concluida","solucao":"Vedação substituída."}'
+}
+registros() {
+  docker compose exec db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+    -c "SELECT ordem_id, tentativas, registrado_em FROM conclusoes_registradas ORDER BY registrado_em"'
+}
+```
+
+**1. Processamento assíncrono.** O `PATCH` responde na hora; o worker registra a conclusão logo depois.
+
+```bash
+concluir
+docker compose logs worker | grep 'conclusão registrada'
+registros
+```
+
+**2. Novas tentativas.** Com duas falhas simuladas, o job falha nas tentativas 1 e 2 e é registrado na 3.
+
+```bash
+FILA_FALHAS_SIMULADAS=2 docker compose up -d worker
+concluir
+sleep 5
+docker compose logs worker --since 10s | grep -e 'nova tentativa' -e 'conclusão registrada'
+```
+
+**3. Reprocessamento.** Com mais falhas do que tentativas, o job esgota as 3 e fica como falho. Depois
+de "corrigir" o worker, o comando de reprocessamento devolve o job à fila e ele é registrado.
+
+```bash
+FILA_FALHAS_SIMULADAS=5 docker compose up -d worker
+concluir
+sleep 5
+docker compose logs worker --since 10s | grep 'tentativas esgotadas'
+
+FILA_FALHAS_SIMULADAS=0 docker compose up -d worker
+docker compose exec worker node src/fila/reprocessar.js
+sleep 2
+docker compose logs worker --since 5s | grep 'conclusão registrada'
+registros
+```
+
 ## Escolha do banco: PostgreSQL
 
 - **O domínio é relacional e de esquema fixo.** Uma ordem tem campos conhecidos e tipados, e não há
@@ -421,7 +500,23 @@ socket, e um healthcheck por socket liberaria a API cedo demais.
   fora do ar, a leitura vira MISS e a gravação e a invalidação só são registradas no log: o cliente
   roda sem fila offline, então os comandos falham na hora em vez de segurar a requisição, e o log
   registra só as mudanças de estado da conexão.
-- O Redis roda sem persistência em disco e sem porta exposta: é só um cache.
+- O Redis não expõe porta. Ele grava em disco (AOF) por causa da fila: os jobs pendentes sobrevivem a
+  um reinício do Redis.
+
+**Fila.** BullMQ sobre o mesmo Redis, com o worker num processo separado (mesma imagem, outro comando).
+
+- **Publicação depois do `COMMIT`**, como a invalidação do cache: o job só existe para conclusões que
+  de fato foram gravadas.
+- **O que o job faz:** grava o histórico da conclusão (`conclusoes_registradas`), sem chave estrangeira
+  para a ordem, para o registro sobreviver a uma exclusão posterior. É o ponto onde entrariam efeitos
+  colaterais lentos ou externos, como notificações e relatórios.
+- **Falhas:** tentativas e backoff ficam no próprio job; jobs que esgotam as tentativas não são
+  removidos (`removeOnFail: false`) e podem ser reprocessados.
+- **A publicação nunca derruba a requisição.** A conexão do produtor roda sem fila offline e a
+  publicação tem limite de 1 s; se a fila não responder, o erro vai para o log e o `PATCH` responde
+  normalmente.
+- **Worker sem migrations:** quem aplica as migrations é a API; o worker sobe depois que a API fica
+  saudável, o que evita duas migrations concorrentes.
 
 **Docker.** `Dockerfile` multi-stage: um estágio instala as dependências de produção com `npm ci` a
 partir do `package-lock.json`, outro monta a imagem de testes, e o estágio final contém só o código e
@@ -435,13 +530,18 @@ src/
 ├── server.js              # aplica migrations, cria o cache, sobe o servidor e trata SIGTERM/SIGINT
 ├── config.js              # valida as variáveis de ambiente
 ├── logger.js
+├── worker.js              # processo do worker da fila
 ├── cache/
 │   └── cache.js           # cache-aside no Redis, com fallback quando o Redis está fora
+├── fila/
+│   ├── fila.js            # publicação, worker e reprocessamento (BullMQ)
+│   ├── conclusoes.repository.js
+│   └── reprocessar.js     # comando que devolve à fila os jobs falhos
 ├── db/
 │   ├── pool.js            # pool do pg (lê PGHOST, PGUSER, PGPASSWORD, PGDATABASE)
 │   ├── transacao.js       # BEGIN/COMMIT/ROLLBACK
 │   ├── migrate.js
-│   └── migrations/001_criar_ordens.sql
+│   └── migrations/        # 001_criar_ordens.sql, 002_criar_conclusoes_registradas.sql
 ├── http/
 │   ├── erros.js           # erros da API com status e código
 │   ├── errorHandler.js    # tratador central de erros
@@ -456,6 +556,7 @@ test/
 ├── helpers.js
 ├── ordens.http.test.js
 ├── cache.test.js
+├── fila.test.js
 └── regras.test.js
 ```
 
@@ -475,6 +576,11 @@ test/
   um `PATCH` concorrente e gravar no cache depois da invalidação, o cache guarda o estado anterior até o
   TTL expirar (60 s por padrão). O mesmo vale se a invalidação falhar porque o Redis caiu naquele
   instante.
+- **Conclusão gravada sem job, se a fila falhar.** A publicação acontece depois do `COMMIT`; se o
+  Redis estiver fora nesse instante, a ordem fica concluída no banco, o erro vai para o log e o job não
+  é criado. Garantir a entrega exigiria um outbox transacional (gravar o evento no PostgreSQL na mesma
+  transação e publicá-lo depois), fora do escopo deste desafio. Com o Redis fora, cada conclusão espera
+  até 1 s pelo limite da publicação.
 - **Redis sem senha**, acessível só pela rede interna do Compose.
 - **Credenciais do banco de teste fixas** em `compose.test.yaml`. O banco é efêmero, fica em memória e
   não expõe porta.

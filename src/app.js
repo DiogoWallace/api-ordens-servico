@@ -8,7 +8,7 @@ const { criarOrdensRouter } = require('./ordens/ordens.routes');
 const { criarServicoOrdens } = require('./ordens/ordens.service');
 const { errorHandler, rotaInexistente } = require('./http/errorHandler');
 
-function criarApp({ logger, cache }) {
+function criarApp({ logger, cache, fila }) {
   const app = express();
 
   app.use(
@@ -29,7 +29,7 @@ function criarApp({ logger, cache }) {
   app.use(helmet());
   app.use(express.json({ limit: '10kb' }));
 
-  app.use('/ordens', criarOrdensRouter(criarServicoOrdens({ cache })));
+  app.use('/ordens', criarOrdensRouter(criarServicoOrdens({ cache, fila })));
 
   app.use(rotaInexistente);
   app.use(errorHandler);

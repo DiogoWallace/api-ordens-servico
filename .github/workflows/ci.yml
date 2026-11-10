@@ -58,6 +58,20 @@ jobs:
           curl -fsS "$url" | jq -e '.status == "em_andamento"'
           test "$(cache "$url")" = HIT
 
+      - name: Fila - a conclusão é registrada pelo worker
+        run: |
+          set -euo pipefail
+          id=$(curl -fsS http://localhost:3000/ordens | jq -r '.[0].id')
+          curl -fsS -X PATCH -H 'Content-Type: application/json' \
+            -d '{"status":"concluida","solucao":"Vedação substituída."}' "http://localhost:3000/ordens/$id" >/dev/null
+          for _ in $(seq 1 20); do
+            n=$(docker compose exec -T db psql -U ordens -d ordens -tAc \
+              "SELECT count(*) FROM conclusoes_registradas WHERE ordem_id = '$id'")
+            [ "$n" = 1 ] && exit 0
+            sleep 1
+          done
+          echo "a conclusão não foi registrada pelo worker"; exit 1
+
       - name: Logs
         if: failure()
         run: docker compose logs
