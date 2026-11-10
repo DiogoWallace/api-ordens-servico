@@ -1,14 +1,18 @@
 # API de ordens de serviço
 
 API RESTful em Node.js e Express para cadastrar, consultar, atualizar e excluir ordens de serviço,
-com persistência em PostgreSQL. Tudo roda em Docker: não é preciso instalar Node.js nem PostgreSQL.
+com persistência em PostgreSQL, cache em Redis e uma fila (BullMQ) que processa as conclusões de forma
+assíncrona. Tudo roda em Docker: não é preciso instalar Node.js, PostgreSQL nem Redis.
 
 - [Pré-requisitos](#pré-requisitos)
 - [Configuração](#configuração)
 - [Execução](#execução)
 - [Testes](#testes)
 - [Contrato da API](#contrato-da-api)
+- [Documentação interativa (OpenAPI)](#documentação-interativa-openapi)
 - [Exemplos de requisição e resposta](#exemplos-de-requisição-e-resposta)
+- [Cache](#cache)
+- [Fila](#fila)
 - [Escolha do banco: PostgreSQL](#escolha-do-banco-postgresql)
 - [Decisões técnicas](#decisões-técnicas)
 - [Estrutura do projeto](#estrutura-do-projeto)
@@ -37,6 +41,10 @@ cp .env.example .env
 | `POSTGRES_PASSWORD` | Senha do PostgreSQL. **Troque o valor de exemplo.** | `troque-esta-senha` |
 | `POSTGRES_DB` | Nome do banco | `ordens` |
 | `LOG_LEVEL` | Nível de log da API (`fatal`, `error`, `warn`, `info`, `debug`, `trace`, `silent`) | `info` |
+| `CACHE_TTL_SEGUNDOS` | Tempo de vida de uma ordem no cache de `GET /ordens/:id` | `60` |
+| `FILA_TENTATIVAS` | Tentativas de cada job da fila antes de ficar como falho | `3` |
+| `FILA_ATRASO_MS` | Atraso base, em ms, do backoff exponencial entre tentativas | `1000` |
+| `FILA_FALHAS_SIMULADAS` | Demonstração: quantas tentativas de cada job o worker faz falhar de propósito | `0` |
 
 Sem o `.env`, o Compose para antes de subir e informa qual variável falta.
 
@@ -46,9 +54,11 @@ Sem o `.env`, o Compose para antes de subir e informa qual variável falta.
 docker compose up --build
 ```
 
-O Compose sobe o PostgreSQL, espera o banco ficar saudável e inicia a API, que aplica as migrations
-pendentes antes de aceitar requisições. A API fica em `http://localhost:3000` (ou na porta definida
-em `API_PORT`). Para rodar em segundo plano, use `docker compose up --build -d`.
+O Compose sobe o PostgreSQL e o Redis, espera os dois ficarem saudáveis e inicia a API, que aplica
+as migrations pendentes antes de aceitar requisições. Com a API saudável, sobe o worker da fila. A API fica em `http://localhost:3000` (ou na porta definida
+em `API_PORT`). Para rodar em segundo plano, use `docker compose up --build -d --wait`: o comando
+só termina quando banco, cache e API estão saudáveis (o healthcheck da API confirma que ela já aceita
+conexões, o que só acontece depois das migrations).
 
 Para encerrar:
 
@@ -59,8 +69,9 @@ docker compose down -v   # para os containers e apaga o volume do banco
 
 ## Testes
 
-Os testes exercitam as rotas HTTP contra um PostgreSQL de teste isolado: outro projeto do Compose,
-com o banco em memória (`tmpfs`), descartado ao final. O banco de desenvolvimento não é tocado.
+Os testes exercitam as rotas HTTP contra um PostgreSQL e um Redis de teste isolados: outro projeto
+do Compose, com o banco em memória (`tmpfs`), descartado ao final. O ambiente de desenvolvimento não é
+tocado.
 
 ```bash
 docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from tests
@@ -81,10 +92,17 @@ A suíte (`node:test` + `supertest`) cobre:
   mesmo `PATCH` ou gravada antes; tentativa de apagar a solução de uma ordem concluída; reabertura;
 - as constraints do banco diretamente em SQL, e a resposta 400 quando uma delas barra a gravação;
 - resposta 500 genérica, sem stack nem detalhes internos;
+- o cache: MISS seguido de HIT sem consultar o banco, tempo de vida, invalidação após `PATCH` e
+  `DELETE`, `PATCH` rejeitado sem efeito no cache, 404 não cacheado e funcionamento com o Redis
+  indisponível;
+- a fila: publicação só quando a ordem passa a `concluida`, processamento pelo worker fora da
+  requisição, novas tentativas até concluir na terceira, job que esgota as tentativas reprocessado com
+  sucesso e publicação que não derruba a requisição com o Redis indisponível;
 - testes unitários da regra de conclusão.
 
 A CI (GitHub Actions) roda a mesma suíte e um smoke test do `compose.yaml` a partir de um clone limpo:
-copia o `.env.example`, sobe a stack, cria uma ordem e a consulta pelo ID retornado.
+copia o `.env.example`, sobe a stack, cria uma ordem, a consulta pelo ID retornado, confere o HIT e a
+invalidação do cache e espera o worker registrar a conclusão da ordem.
 
 ## Contrato da API
 
@@ -121,7 +139,21 @@ copia o `.env.example`, sobe a stack, cria uma ordem e a consulta pelo ID retorn
 | `ROTA_INEXISTENTE` | 404 | Rota não existe |
 | `ERRO_INTERNO` | 500 | Erro inesperado; o detalhe fica só no log do servidor |
 
-Toda resposta traz o header `X-Request-Id`, o mesmo registrado no log da requisição.
+Toda resposta traz o header `X-Request-Id`, o mesmo registrado no log da requisição. `GET /ordens/:id`
+traz também `X-Cache: HIT` ou `X-Cache: MISS` (veja [Cache](#cache)).
+
+## Documentação interativa (OpenAPI)
+
+Com a API no ar:
+
+- **Swagger UI:** <http://localhost:3000/docs>. Cada operação tem exemplos e o botão *Try it out*,
+  que envia a requisição para a própria API.
+- **Especificação OpenAPI 3.1:** <http://localhost:3000/openapi.json>, gerada a partir de
+  [`openapi.yaml`](openapi.yaml).
+
+A especificação descreve as cinco operações, os schemas de entrada (com `additionalProperties: false`,
+como a validação da API), as respostas de erro com exemplos e os headers `X-Cache` e `X-Request-Id`.
+Um teste confere que ela documenta exatamente as cinco operações e os status de cada uma.
 
 ## Exemplos de requisição e resposta
 
@@ -287,6 +319,114 @@ curl -i -X DELETE http://localhost:3000/ordens/612f32fc-9c29-43d4-b796-889aeae47
 
 `204 No Content`, sem corpo. Uma nova consulta ou exclusão do mesmo ID responde `404`.
 
+## Cache
+
+`GET /ordens/:id` usa cache em Redis no padrão cache-aside:
+
+- **MISS:** a ordem não está no cache; a API lê do banco, grava no cache por `CACHE_TTL_SEGUNDOS` e
+  responde com `X-Cache: MISS`.
+- **HIT:** a ordem está no cache; a API responde sem consultar o banco, com `X-Cache: HIT`.
+- **Invalidação:** `PATCH` e `DELETE` removem a ordem do cache depois do `COMMIT`. A leitura seguinte é
+  um MISS e traz o dado atualizado (ou 404, depois da exclusão). Um `PATCH` rejeitado não mexe no cache.
+- Ordem inexistente (404) não é cacheada. A listagem `GET /ordens` não usa cache.
+
+### Demonstração
+
+Com a API no ar e uma ordem criada (troque `$ID` pelo ID retornado no `POST`):
+
+```bash
+curl -s -o /dev/null -D - http://localhost:3000/ordens/$ID | grep -i x-cache   # X-Cache: MISS
+curl -s -o /dev/null -D - http://localhost:3000/ordens/$ID | grep -i x-cache   # X-Cache: HIT
+
+curl -s -X PATCH http://localhost:3000/ordens/$ID \
+  -H 'Content-Type: application/json' -d '{"status":"em_andamento"}' > /dev/null
+
+curl -s -D - http://localhost:3000/ordens/$ID | grep -i -e x-cache -e em_andamento
+# X-Cache: MISS, já com "status":"em_andamento"
+curl -s -o /dev/null -D - http://localhost:3000/ordens/$ID | grep -i x-cache   # X-Cache: HIT
+
+curl -s -o /dev/null -X DELETE http://localhost:3000/ordens/$ID
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:3000/ordens/$ID         # 404
+```
+
+Para ver a chave e o tempo de vida direto no Redis:
+
+```bash
+docker compose exec cache redis-cli TTL ordem:$ID
+```
+
+## Fila
+
+Quando uma ordem **passa a `concluida`**, a API publica o job `registrar-conclusao` numa fila BullMQ
+(no mesmo Redis) e responde sem esperar o processamento. O worker, um processo separado (serviço
+`worker` no Compose), consome a fila e grava o registro da conclusão na tabela
+`conclusoes_registradas`.
+
+- **Assíncrono:** a publicação acontece depois do `COMMIT`; o registro é gravado pelo worker, fora da
+  requisição.
+- **Novas tentativas:** cada job tem `FILA_TENTATIVAS` tentativas (3), com backoff exponencial a partir
+  de `FILA_ATRASO_MS` (1 s, 2 s…).
+- **Reprocessamento:** o job que esgota as tentativas fica guardado como falho; o comando
+  `node src/fila/reprocessar.js` o devolve à fila com a contagem de tentativas zerada.
+- **Idempotência:** o ID do job é derivado da ordem e do instante da conclusão, e o registro usa o ID
+  do job como chave. Reprocessar ou receber o mesmo job duas vezes não duplica o registro.
+- Alterar uma ordem que já está concluída não publica outra conclusão. Reabrir e concluir de novo
+  publica.
+
+Para demonstrar as falhas, `FILA_FALHAS_SIMULADAS=N` faz o worker falhar de propósito nas N primeiras
+tentativas de cada job.
+
+### Demonstração
+
+Com a stack no ar (`docker compose up --build -d --wait`), crie e conclua uma ordem:
+
+```bash
+concluir() {
+  ID=$(curl -s -X POST http://localhost:3000/ordens -H 'Content-Type: application/json' \
+    -d '{"titulo":"Inspeção da válvula VLV-OS-73A","descricao":"Verificar vedação e registrar o resultado da inspeção."}' \
+    | sed -E 's/.*"id":"([^"]+)".*/\1/')
+  curl -s -o /dev/null -w "PATCH %{http_code}\n" -X PATCH http://localhost:3000/ordens/$ID \
+    -H 'Content-Type: application/json' -d '{"status":"concluida","solucao":"Vedação substituída."}'
+}
+registros() {
+  docker compose exec db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+    -c "SELECT ordem_id, tentativas, registrado_em FROM conclusoes_registradas ORDER BY registrado_em"'
+}
+```
+
+**1. Processamento assíncrono.** O `PATCH` responde na hora; o worker registra a conclusão logo depois.
+
+```bash
+concluir
+docker compose logs worker | grep 'conclusão registrada'
+registros
+```
+
+**2. Novas tentativas.** Com duas falhas simuladas, o job falha nas tentativas 1 e 2 e é registrado na 3.
+
+```bash
+FILA_FALHAS_SIMULADAS=2 docker compose up -d worker
+concluir
+sleep 5
+docker compose logs worker --since 10s | grep -e 'nova tentativa' -e 'conclusão registrada'
+```
+
+**3. Reprocessamento.** Com mais falhas do que tentativas, o job esgota as 3 e fica como falho. Depois
+de "corrigir" o worker, o comando de reprocessamento devolve o job à fila e ele é registrado.
+
+```bash
+FILA_FALHAS_SIMULADAS=5 docker compose up -d worker
+concluir
+sleep 5
+docker compose logs worker --since 10s | grep 'tentativas esgotadas'
+
+FILA_FALHAS_SIMULADAS=0 docker compose up -d worker
+docker compose exec worker node src/fila/reprocessar.js
+sleep 2
+docker compose logs worker --since 5s | grep 'conclusão registrada'
+registros
+```
+
 ## Escolha do banco: PostgreSQL
 
 - **O domínio é relacional e de esquema fixo.** Uma ordem tem campos conhecidos e tipados, e não há
@@ -364,6 +504,57 @@ mantém a criação do banco dentro do `docker compose up`, sem passo manual. O 
 usa TCP: durante a inicialização, o servidor temporário do container aceita só conexões locais por
 socket, e um healthcheck por socket liberaria a API cedo demais.
 
+**Cache.** Redis com cliente `redis`, injetado no serviço de ordens (`criarApp({ logger, cache })`).
+
+- O cache só é invalidado **depois do `COMMIT`**. Invalidar dentro da transação abriria uma janela em
+  que uma leitura concorrente repovoaria o cache com o estado ainda não alterado.
+- Invalidar em vez de regravar mantém um único caminho de escrita no cache (a leitura) e não grava
+  ordens que talvez nunca sejam lidas.
+- **O Redis é opcional para a disponibilidade.** Sem `REDIS_URL`, a API roda sem cache. Com o Redis
+  fora do ar, a leitura vira MISS e a gravação e a invalidação só são registradas no log: o cliente
+  roda sem fila offline, então os comandos falham na hora em vez de segurar a requisição, e o log
+  registra só as mudanças de estado da conexão.
+- O Redis não expõe porta. Ele grava em disco (AOF) por causa da fila: os jobs pendentes sobrevivem a
+  um reinício do Redis.
+
+**Fila.** BullMQ sobre o mesmo Redis, com o worker num processo separado (mesma imagem, outro comando).
+
+- **Publicação depois do `COMMIT`**, como a invalidação do cache: o job só existe para conclusões que
+  de fato foram gravadas.
+- **O que o job faz:** grava o histórico da conclusão (`conclusoes_registradas`), sem chave estrangeira
+  para a ordem, para o registro sobreviver a uma exclusão posterior. É o ponto onde entrariam efeitos
+  colaterais lentos ou externos, como notificações e relatórios.
+- **Falhas:** tentativas e backoff ficam no próprio job; jobs que esgotam as tentativas não são
+  removidos (`removeOnFail: false`) e podem ser reprocessados.
+- **A publicação nunca derruba a requisição.** A conexão do produtor roda sem fila offline e a
+  publicação tem limite de 1 s; se a fila não responder, o erro vai para o log e o `PATCH` responde
+  normalmente.
+- **Worker sem migrations:** quem aplica as migrations é a API; o worker sobe depois que a API fica
+  saudável, o que evita duas migrations concorrentes.
+
+**Índice da listagem.** `GET /ordens` executa `SELECT ... FROM ordens ORDER BY criado_em, id`. A
+migration `003` cria o índice `ordens_criado_em_id_idx (criado_em, id)`, nas mesmas colunas e na mesma
+ordem do `ORDER BY`, para o PostgreSQL ler as linhas já ordenadas em vez de ordenar a tabela inteira a
+cada listagem.
+
+Medição com `EXPLAIN (ANALYZE, BUFFERS)` sobre 10 mil ordens, com `criado_em` crescendo junto com a
+inserção, que é o caso normal, porque a coluna recebe `now()` ao criar a ordem:
+
+| Consulta | Sem índice | Com índice |
+|---|---|---|
+| Listagem completa (a rota atual) | Seq Scan + Sort em memória (1,3 MB): 3,7 ms | Index Scan, sem Sort: 2,5 ms |
+| Primeira página (`LIMIT 20`) | Seq Scan + top-N: 1,4 ms, lê a tabela toda | Index Scan: 0,07 ms, lê 3 páginas |
+
+- O ganho na rota atual é tirar o Sort. Hoje ele é pequeno, mas a memória do Sort cresce com a tabela
+  e, passado o `work_mem` (4 MB por padrão), a ordenação vai para disco.
+- O ganho grande vem com paginação: com o índice, a primeira página custa o mesmo com 10 mil ou
+  10 milhões de ordens.
+- Quando `criado_em` não acompanha a ordem física das linhas (por exemplo, dados importados com datas
+  antigas), o Index Scan da listagem completa faz leituras aleatórias e chega a ser mais lento que o
+  Seq Scan + Sort (4,1 ms contra 3,6 ms na mesma medição); a paginação continua ganhando (0,05 ms
+  contra 1,4 ms).
+- O custo do índice é uma escrita a mais em cada `INSERT`.
+
 **Docker.** `Dockerfile` multi-stage: um estágio instala as dependências de produção com `npm ci` a
 partir do `package-lock.json`, outro monta a imagem de testes, e o estágio final contém só o código e
 as dependências de produção.
@@ -371,19 +562,28 @@ as dependências de produção.
 ## Estrutura do projeto
 
 ```
+openapi.yaml               # especificação OpenAPI 3.1 da API
 src/
-├── app.js                 # monta o Express: log, helmet, JSON, rotas, 404 e tratador de erros
-├── server.js              # aplica migrations, sobe o servidor e trata SIGTERM/SIGINT
+├── app.js                 # monta o Express: log, helmet, documentação, rotas, 404 e tratador de erros
+├── server.js              # aplica migrations, cria o cache, sobe o servidor e trata SIGTERM/SIGINT
 ├── config.js              # valida as variáveis de ambiente
 ├── logger.js
+├── worker.js              # processo do worker da fila
+├── cache/
+│   └── cache.js           # cache-aside no Redis, com fallback quando o Redis está fora
+├── fila/
+│   ├── fila.js            # publicação, worker e reprocessamento (BullMQ)
+│   ├── conclusoes.repository.js
+│   └── reprocessar.js     # comando que devolve à fila os jobs falhos
 ├── db/
 │   ├── pool.js            # pool do pg (lê PGHOST, PGUSER, PGPASSWORD, PGDATABASE)
 │   ├── transacao.js       # BEGIN/COMMIT/ROLLBACK
 │   ├── migrate.js
-│   └── migrations/001_criar_ordens.sql
+│   └── migrations/        # 001 ordens, 002 conclusões registradas, 003 índice da listagem
 ├── http/
 │   ├── erros.js           # erros da API com status e código
 │   ├── errorHandler.js    # tratador central de erros
+│   ├── docs.js            # Swagger UI em /docs e especificação em /openapi.json
 │   └── validar.js         # aplica um schema zod e converte as falhas em detalhes
 └── ordens/
     ├── ordens.routes.js
@@ -394,13 +594,17 @@ src/
 test/
 ├── helpers.js
 ├── ordens.http.test.js
+├── cache.test.js
+├── fila.test.js
+├── docs.test.js
 └── regras.test.js
 ```
 
 ## Limitações
 
 - **Sem autenticação nem autorização**, fora do escopo do desafio.
-- **Sem paginação nem filtros** em `GET /ordens`: a listagem devolve todas as ordens.
+- **Sem paginação nem filtros** em `GET /ordens`: a listagem devolve todas as ordens. O índice da
+  listagem já atende uma paginação por `criado_em, id`.
 - **CORS desabilitado.** A API não envia headers CORS, então nenhuma origem de navegador está
   autorizada; clientes como `curl`, outros serviços e ferramentas de API funcionam normalmente.
 - **Espaços Unicode.** A aplicação usa o `trim()` do JavaScript e o banco usa `\S`; em casos raros de
@@ -409,6 +613,16 @@ test/
 - **Migrations só para frente**, sem rollback automático, e pensadas para uma única instância da API
   aplicando-as na inicialização.
 - **`atualizado_em` muda a cada `PATCH` aceito**, mesmo que os valores enviados sejam iguais aos atuais.
+- **Cache com consistência eventual em corridas raras.** Se uma leitura buscar a ordem no banco antes de
+  um `PATCH` concorrente e gravar no cache depois da invalidação, o cache guarda o estado anterior até o
+  TTL expirar (60 s por padrão). O mesmo vale se a invalidação falhar porque o Redis caiu naquele
+  instante.
+- **Conclusão gravada sem job, se a fila falhar.** A publicação acontece depois do `COMMIT`; se o
+  Redis estiver fora nesse instante, a ordem fica concluída no banco, o erro vai para o log e o job não
+  é criado. Garantir a entrega exigiria um outbox transacional (gravar o evento no PostgreSQL na mesma
+  transação e publicá-lo depois), fora do escopo deste desafio. Com o Redis fora, cada conclusão espera
+  até 1 s pelo limite da publicação.
+- **Redis sem senha**, acessível só pela rede interna do Compose.
 - **Credenciais do banco de teste fixas** em `compose.test.yaml`. O banco é efêmero, fica em memória e
   não expõe porta.
 
@@ -421,8 +635,11 @@ Revisei o código entregue e sou capaz de explicá-lo, testá-lo e alterá-lo.
 |---|---|
 | Leitura do enunciado e planejamento | Organização dos requisitos, plano de implementação e levantamento de casos de borda, como o `CHECK` que aceita `NULL` |
 | Estrutura do repositório | Configuração de branches, rulesets, templates de issue e PR, e workflows de CI |
-| Implementação | Primeira versão do código, do `Dockerfile`, dos arquivos do Compose e dos testes |
-| Documentação | Rascunho deste README, com os exemplos conferidos contra a API em execução |
+| Implementação da entrega base | Primeira versão do código, do `Dockerfile`, dos arquivos do Compose e dos testes |
+| Diferenciais | Primeira versão do cache, da fila (produtor, worker e reprocessamento), da especificação OpenAPI e das medições com `EXPLAIN` que justificam o índice |
+| CI e diagnóstico | Workflows de testes e smoke, e diagnóstico de falhas, como a API sem healthcheck que fazia o `--wait` liberar o smoke antes das migrations |
+| Documentação | Rascunho deste README, com os exemplos e as demonstrações conferidos contra a API em execução |
+| Validação final | Roteiro de verificação num clone limpo do repositório público e revisão de código sem uso |
 
 As decisões de contrato e de arquitetura descritas acima foram discutidas com o assistente e definidas
 por mim.
