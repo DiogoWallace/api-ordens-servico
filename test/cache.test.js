@@ -105,6 +105,43 @@ describe('Cache de GET /ordens/:id', () => {
   });
 });
 
+// O PostgreSQL aceita o UUID em maiúsculas ou minúsculas como o mesmo valor; a chave do cache
+// precisa seguir a mesma regra, senão a invalidação erra a chave.
+describe('Cache com o UUID em maiúsculas', () => {
+  it('leitura em maiúsculas usa a mesma entrada da leitura em minúsculas', async () => {
+    const criada = await criarOrdem();
+    await ler(criada.id);
+
+    const res = await ler(criada.id.toUpperCase());
+
+    assert.equal(res.headers['x-cache'], 'HIT');
+    assert.equal(res.body.id, criada.id);
+  });
+
+  it('PATCH em maiúsculas invalida o cache preenchido em minúsculas', async () => {
+    const criada = await criarOrdem();
+    await ler(criada.id);
+
+    const patch = await request(app)
+      .patch(`/ordens/${criada.id.toUpperCase()}`)
+      .send({ titulo: 'Título novo' });
+    assert.equal(patch.status, 200);
+
+    const depois = await ler(criada.id);
+    assert.equal(depois.headers['x-cache'], 'MISS');
+    assert.equal(depois.body.titulo, 'Título novo');
+  });
+
+  it('DELETE em maiúsculas invalida o cache preenchido em minúsculas', async () => {
+    const criada = await criarOrdem();
+    await ler(criada.id);
+
+    assert.equal((await request(app).delete(`/ordens/${criada.id.toUpperCase()}`)).status, 204);
+
+    assert.equal((await ler(criada.id)).status, 404);
+  });
+});
+
 describe('Cache indisponível', () => {
   it('leitura vira MISS e gravação e invalidação não lançam erro', async () => {
     // Porta sem Redis: o cliente nunca fica pronto.
