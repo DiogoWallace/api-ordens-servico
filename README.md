@@ -9,6 +9,7 @@ assíncrona. Tudo roda em Docker: não é preciso instalar Node.js, PostgreSQL n
 - [Execução](#execução)
 - [Testes](#testes)
 - [Contrato da API](#contrato-da-api)
+- [Documentação interativa (OpenAPI)](#documentação-interativa-openapi)
 - [Exemplos de requisição e resposta](#exemplos-de-requisição-e-resposta)
 - [Cache](#cache)
 - [Fila](#fila)
@@ -140,6 +141,19 @@ invalidação do cache e espera o worker registrar a conclusão da ordem.
 
 Toda resposta traz o header `X-Request-Id`, o mesmo registrado no log da requisição. `GET /ordens/:id`
 traz também `X-Cache: HIT` ou `X-Cache: MISS` (veja [Cache](#cache)).
+
+## Documentação interativa (OpenAPI)
+
+Com a API no ar:
+
+- **Swagger UI:** <http://localhost:3000/docs>. Cada operação tem exemplos e o botão *Try it out*,
+  que envia a requisição para a própria API.
+- **Especificação OpenAPI 3.1:** <http://localhost:3000/openapi.json>, gerada a partir de
+  [`openapi.yaml`](openapi.yaml).
+
+A especificação descreve as cinco operações, os schemas de entrada (com `additionalProperties: false`,
+como a validação da API), as respostas de erro com exemplos e os headers `X-Cache` e `X-Request-Id`.
+Um teste confere que ela documenta exatamente as cinco operações e os status de cada uma.
 
 ## Exemplos de requisição e resposta
 
@@ -518,6 +532,29 @@ socket, e um healthcheck por socket liberaria a API cedo demais.
 - **Worker sem migrations:** quem aplica as migrations é a API; o worker sobe depois que a API fica
   saudável, o que evita duas migrations concorrentes.
 
+**Índice da listagem.** `GET /ordens` executa `SELECT ... FROM ordens ORDER BY criado_em, id`. A
+migration `003` cria o índice `ordens_criado_em_id_idx (criado_em, id)`, nas mesmas colunas e na mesma
+ordem do `ORDER BY`, para o PostgreSQL ler as linhas já ordenadas em vez de ordenar a tabela inteira a
+cada listagem.
+
+Medição com `EXPLAIN (ANALYZE, BUFFERS)` sobre 10 mil ordens, com `criado_em` crescendo junto com a
+inserção, que é o caso normal, porque a coluna recebe `now()` ao criar a ordem:
+
+| Consulta | Sem índice | Com índice |
+|---|---|---|
+| Listagem completa (a rota atual) | Seq Scan + Sort em memória (1,3 MB): 3,7 ms | Index Scan, sem Sort: 2,5 ms |
+| Primeira página (`LIMIT 20`) | Seq Scan + top-N: 1,4 ms, lê a tabela toda | Index Scan: 0,07 ms, lê 3 páginas |
+
+- O ganho na rota atual é tirar o Sort. Hoje ele é pequeno, mas a memória do Sort cresce com a tabela
+  e, passado o `work_mem` (4 MB por padrão), a ordenação vai para disco.
+- O ganho grande vem com paginação: com o índice, a primeira página custa o mesmo com 10 mil ou
+  10 milhões de ordens.
+- Quando `criado_em` não acompanha a ordem física das linhas (por exemplo, dados importados com datas
+  antigas), o Index Scan da listagem completa faz leituras aleatórias e chega a ser mais lento que o
+  Seq Scan + Sort (4,1 ms contra 3,6 ms na mesma medição); a paginação continua ganhando (0,05 ms
+  contra 1,4 ms).
+- O custo do índice é uma escrita a mais em cada `INSERT`.
+
 **Docker.** `Dockerfile` multi-stage: um estágio instala as dependências de produção com `npm ci` a
 partir do `package-lock.json`, outro monta a imagem de testes, e o estágio final contém só o código e
 as dependências de produção.
@@ -525,8 +562,9 @@ as dependências de produção.
 ## Estrutura do projeto
 
 ```
+openapi.yaml               # especificação OpenAPI 3.1 da API
 src/
-├── app.js                 # monta o Express: log, helmet, JSON, rotas, 404 e tratador de erros
+├── app.js                 # monta o Express: log, helmet, documentação, rotas, 404 e tratador de erros
 ├── server.js              # aplica migrations, cria o cache, sobe o servidor e trata SIGTERM/SIGINT
 ├── config.js              # valida as variáveis de ambiente
 ├── logger.js
@@ -541,10 +579,11 @@ src/
 │   ├── pool.js            # pool do pg (lê PGHOST, PGUSER, PGPASSWORD, PGDATABASE)
 │   ├── transacao.js       # BEGIN/COMMIT/ROLLBACK
 │   ├── migrate.js
-│   └── migrations/        # 001_criar_ordens.sql, 002_criar_conclusoes_registradas.sql
+│   └── migrations/        # 001 ordens, 002 conclusões registradas, 003 índice da listagem
 ├── http/
 │   ├── erros.js           # erros da API com status e código
 │   ├── errorHandler.js    # tratador central de erros
+│   ├── docs.js            # Swagger UI em /docs e especificação em /openapi.json
 │   └── validar.js         # aplica um schema zod e converte as falhas em detalhes
 └── ordens/
     ├── ordens.routes.js
@@ -557,13 +596,15 @@ test/
 ├── ordens.http.test.js
 ├── cache.test.js
 ├── fila.test.js
+├── docs.test.js
 └── regras.test.js
 ```
 
 ## Limitações
 
 - **Sem autenticação nem autorização**, fora do escopo do desafio.
-- **Sem paginação nem filtros** em `GET /ordens`: a listagem devolve todas as ordens.
+- **Sem paginação nem filtros** em `GET /ordens`: a listagem devolve todas as ordens. O índice da
+  listagem já atende uma paginação por `criado_em, id`.
 - **CORS desabilitado.** A API não envia headers CORS, então nenhuma origem de navegador está
   autorizada; clientes como `curl`, outros serviços e ferramentas de API funcionam normalmente.
 - **Espaços Unicode.** A aplicação usa o `trim()` do JavaScript e o banco usa `\S`; em casos raros de
