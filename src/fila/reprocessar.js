@@ -11,6 +11,8 @@ async function executar() {
   if (!url) throw new Error('REDIS_URL é obrigatória.');
 
   const logger = criarLogger(process.env.LOG_LEVEL ?? 'info');
+  // Só lê e reenvia jobs existentes, que mantêm as próprias opções de tentativas e backoff;
+  // os valores abaixo valeriam apenas para jobs novos, que este comando não cria.
   const fila = criarFila({ url, tentativas: 1, atrasoMs: 1, logger });
   try {
     await fila.queue.waitUntilReady();

@@ -635,8 +635,11 @@ Revisei o código entregue e sou capaz de explicá-lo, testá-lo e alterá-lo.
 |---|---|
 | Leitura do enunciado e planejamento | Organização dos requisitos, plano de implementação e levantamento de casos de borda, como o `CHECK` que aceita `NULL` |
 | Estrutura do repositório | Configuração de branches, rulesets, templates de issue e PR, e workflows de CI |
-| Implementação | Primeira versão do código, do `Dockerfile`, dos arquivos do Compose e dos testes |
-| Documentação | Rascunho deste README, com os exemplos conferidos contra a API em execução |
+| Implementação da entrega base | Primeira versão do código, do `Dockerfile`, dos arquivos do Compose e dos testes |
+| Diferenciais | Primeira versão do cache, da fila (produtor, worker e reprocessamento), da especificação OpenAPI e das medições com `EXPLAIN` que justificam o índice |
+| CI e diagnóstico | Workflows de testes e smoke, e diagnóstico de falhas, como a API sem healthcheck que fazia o `--wait` liberar o smoke antes das migrations |
+| Documentação | Rascunho deste README, com os exemplos e as demonstrações conferidos contra a API em execução |
+| Validação final | Roteiro de verificação num clone limpo do repositório público e revisão de código sem uso |
 
 As decisões de contrato e de arquitetura descritas acima foram discutidas com o assistente e definidas
 por mim.
