@@ -122,10 +122,8 @@ async function reprocessarFalhas(queue) {
 }
 
 module.exports = {
-  NOME_FILA,
   criarFila,
   criarWorkerConclusoes,
   reprocessarFalhas,
   idDoJob,
-  opcoesRedis,
 };
