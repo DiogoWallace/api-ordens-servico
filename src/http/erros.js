@@ -17,6 +17,14 @@ class EntradaInvalida extends AppError {
   }
 }
 
+class RegraConclusao extends AppError {
+  constructor() {
+    super(400, 'REGRA_CONCLUSAO', 'Uma ordem só pode ser concluída com uma solução preenchida.', [
+      { campo: 'solucao', problema: 'obrigatória para concluir a ordem' },
+    ]);
+  }
+}
+
 class NaoEncontrada extends AppError {
   constructor(mensagem = 'Ordem de serviço não encontrada.') {
     super(404, 'NAO_ENCONTRADA', mensagem);
@@ -29,4 +37,4 @@ class RotaInexistente extends AppError {
   }
 }
 
-module.exports = { AppError, EntradaInvalida, NaoEncontrada, RotaInexistente };
+module.exports = { AppError, EntradaInvalida, RegraConclusao, NaoEncontrada, RotaInexistente };

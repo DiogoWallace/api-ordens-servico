@@ -1,6 +1,9 @@
 'use strict';
 
-const { AppError, RotaInexistente } = require('./erros');
+const { AppError, EntradaInvalida, RegraConclusao, RotaInexistente } = require('./erros');
+
+// Código do PostgreSQL para violação de CHECK.
+const CHECK_VIOLATION = '23514';
 
 function corpoDeErro(codigo, mensagem, detalhes = []) {
   return { erro: { codigo, mensagem, detalhes } };
@@ -13,12 +16,24 @@ function mensagemDoParser(erro) {
   return 'Corpo da requisição inválido.';
 }
 
+// As constraints do banco repetem as validações da aplicação. Se uma delas barrar a gravação,
+// a entrada era inválida: responde 400 e registra o caso, que indica uma brecha na validação.
+function erroDeConstraint(erro) {
+  if (erro.constraint === 'ordens_conclusao_exige_solucao') return new RegraConclusao();
+  return new EntradaInvalida();
+}
+
 function rotaInexistente(_req, _res, next) {
   next(new RotaInexistente());
 }
 
 // O Express reconhece o tratador de erros pelos quatro parâmetros.
 function errorHandler(erro, req, res, _next) {
+  if (erro.code === CHECK_VIOLATION) {
+    req.log.warn({ err: erro, constraint: erro.constraint }, 'gravação barrada por constraint do banco');
+    erro = erroDeConstraint(erro);
+  }
+
   if (erro instanceof AppError) {
     return res.status(erro.status).json(corpoDeErro(erro.codigo, erro.message, erro.detalhes));
   }
