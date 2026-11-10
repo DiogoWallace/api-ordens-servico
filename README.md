@@ -448,7 +448,10 @@ explícito deixa claro o que cada operação faz no banco.
 
 **Validação na borda.** Cada corpo e cada ID passam por um schema `zod` estrito antes de chegar ao
 serviço. Campos fora do contrato são rejeitados, inclusive `id`. O ID é validado como UUID **antes** da
-consulta; assim um ID malformado responde 400, e um UUID válido sem ordem responde 404.
+consulta; assim um ID malformado responde 400, e um UUID válido sem ordem responde 404. Depois de
+validado, o ID é convertido para minúsculas: o PostgreSQL trata `ABC…` e `abc…` como o mesmo UUID, e a
+chave do cache (`ordem:{id}`) precisa ser a mesma nos dois casos, senão um `PATCH` ou `DELETE` com outra
+grafia deixaria no cache a versão antiga da ordem.
 
 **Normalização dos textos.** `titulo`, `descricao` e `solucao` são gravados sem os espaços das
 extremidades. Uma `solucao` vazia depois disso é gravada como `NULL`, de modo que "sem solução" tem uma

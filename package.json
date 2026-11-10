@@ -1,6 +1,6 @@
 {
   "name": "api-ordens-servico",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "API RESTful de ordens de serviço em Node.js, Express e PostgreSQL",
   "main": "src/server.js",

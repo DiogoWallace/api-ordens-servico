@@ -22,8 +22,13 @@ const solucao = () =>
     .trim()
     .transform((valor) => (valor === '' ? null : valor));
 
+// O ID é normalizado para minúsculas: o PostgreSQL trata as duas grafias como o mesmo UUID,
+// e a chave do cache (ordem:{id}) precisa ser a mesma para as duas.
 const idParam = z.object({
-  id: z.string().regex(UUID, 'deve ser um UUID válido'),
+  id: z
+    .string()
+    .regex(UUID, 'deve ser um UUID válido')
+    .transform((id) => id.toLowerCase()),
 });
 
 const criarOrdem = z.strictObject({
