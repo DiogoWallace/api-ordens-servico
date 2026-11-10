@@ -1,0 +1,33 @@
+# Testes em banco isolado: o banco roda em memória (tmpfs) e é descartado ao final.
+# As credenciais abaixo valem só para este banco efêmero, sem porta exposta.
+name: api-ordens-servico-test
+
+services:
+  db-test:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ordens_test
+      POSTGRES_PASSWORD: ordens_test
+      POSTGRES_DB: ordens_test
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ordens_test -d ordens_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  tests:
+    build:
+      context: .
+      target: test
+    environment:
+      PGHOST: db-test
+      PGPORT: 5432
+      PGUSER: ordens_test
+      PGPASSWORD: ordens_test
+      PGDATABASE: ordens_test
+      LOG_LEVEL: silent
+    depends_on:
+      db-test:
+        condition: service_healthy

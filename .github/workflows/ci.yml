@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [dev, homolog, main]
+  push:
+    branches: [dev, homolog, main]
+
+permissions:
+  contents: read
+
+jobs:
+  testes:
+    name: Testes (API)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rodar os testes em banco isolado
+        run: docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from tests
+
+      - name: Encerrar
+        if: always()
+        run: docker compose -f compose.test.yaml down -v
+
+  smoke:
+    name: Smoke (Compose)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preparar o ambiente como em um clone limpo
+        run: cp .env.example .env
+
+      - name: Subir API e banco
+        run: docker compose up -d --build --wait
+
+      - name: Criar uma ordem e consultá-la pelo id retornado
+        run: |
+          set -euo pipefail
+          corpo='{"titulo":"Inspeção da válvula VLV-OS-73A","descricao":"Verificar vedação e registrar o resultado da inspeção."}'
+          criada=$(curl -fsS --retry 15 --retry-connrefused --retry-delay 1 \
+            -H 'Content-Type: application/json' -d "$corpo" http://localhost:3000/ordens)
+          echo "$criada"
+          id=$(jq -r .id <<<"$criada")
+          curl -fsS "http://localhost:3000/ordens/$id" \
+            | jq -e --arg id "$id" '.id == $id and .status == "aberta" and .solucao == null'
+
+      - name: Logs
+        if: failure()
+        run: docker compose logs
+
+      - name: Encerrar
+        if: always()
+        run: docker compose down -v
