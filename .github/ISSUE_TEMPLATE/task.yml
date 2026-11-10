@@ -1,0 +1,41 @@
+name: Task
+description: Trabalho técnico sem mudança de comportamento da API (documentação, testes, infraestrutura, refatoração).
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use no título o tipo que descreve o trabalho: `[DOCS]`, `[TEST]`, `[INFRA]`, `[REFACTOR]`
+        ou `[SECURITY]`.
+  - type: textarea
+    id: goal
+    attributes:
+      label: Objetivo
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Contexto
+      description: Situação atual e evidências (arquivo e linha, run da CI, resposta da API).
+    validations:
+      required: true
+  - type: textarea
+    id: activities
+    attributes:
+      label: Atividades
+      value: |
+        - [ ]
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: Critérios de conclusão
+      value: |
+        - [ ]
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependências

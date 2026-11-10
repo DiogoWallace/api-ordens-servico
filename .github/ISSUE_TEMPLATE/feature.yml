@@ -1,0 +1,55 @@
+name: Feature
+description: Funcionalidade nova ou mudança de comportamento da API.
+title: "[FEATURE] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Uma issue = uma entrega verificável.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problema ou necessidade
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: Objetivo
+      description: O resultado esperado, do ponto de vista de quem consome a API.
+    validations:
+      required: true
+  - type: textarea
+    id: requirements
+    attributes:
+      label: Requisitos
+      description: Regras de negócio, contrato HTTP, validações, dados.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Escopo
+    validations:
+      required: true
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Fora do escopo
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Critérios de aceite
+      description: Verificáveis; incluam os testes HTTP esperados.
+      value: |
+        - [ ]
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependências
+      description: Issues ou PRs (#número).

@@ -1,0 +1,60 @@
+name: Bug
+description: Comportamento incorreto, com como reproduzir e o impacto.
+title: "[BUG] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Antes de abrir, procure uma issue igual. Não cole senhas, tokens nem o conteúdo do `.env`.
+  - type: textarea
+    id: context
+    attributes:
+      label: Contexto
+      description: Rota ou comando onde o problema aparece.
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: Comportamento atual
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Comportamento esperado
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Como reproduzir
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Ambiente
+      description: Branch e commit, execução local (Compose) ou CI.
+      placeholder: "dev @ abc1234, docker compose"
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidências
+      description: Logs, respostas HTTP, link do run da CI.
+  - type: textarea
+    id: done
+    attributes:
+      label: Critérios de correção
+      description: Como saber que está corrigido; inclua o teste de regressão esperado.
+      value: |
+        - [ ] Teste que falha sem a correção
+        - [ ]
+    validations:
+      required: true

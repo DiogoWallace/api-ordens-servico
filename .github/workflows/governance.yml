@@ -1,0 +1,88 @@
+# Regras dos PRs: origem × destino, nome da branch e descrição mínima.
+# Fluxo: tipo/numero-descricao → dev → homolog → main.
+# Roda também quando a descrição é editada, para que o check reflita o texto atual.
+name: Governance
+
+on:
+  pull_request:
+    branches: [dev, homolog, main]
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  pr:
+    name: Governance (PR)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Conferir origem, destino, nome e descrição
+        env:
+          BASE: ${{ github.event.pull_request.base.ref }}
+          HEAD: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+
+          work_re='^(feat|fix|docs|refactor|test|infra)/([0-9]+)-[a-z0-9]+(-[a-z0-9]+)*$'
+          hotfix_re='^hotfix/([0-9]+)-[a-z0-9]+(-[a-z0-9]+)*$'
+          homolog_fix_re='^fix/([0-9]+)-[a-z0-9]+(-[a-z0-9]+)*$'
+
+          fail() { echo "::error::$1"; echo "❌ $1" >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+          ok() { echo "$1"; echo "✅ $1" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+
+          same_repo=false
+          [ "$HEAD_REPO" = "$REPO" ] && same_repo=true
+
+          needs_issue() {
+            local number="$1"
+            [ -n "${BODY// }" ] || fail "Descrição vazia: use o template de PR."
+            printf '%s' "$BODY" | grep -Eq "#${number}([^0-9]|$)" \
+              || fail "A descrição precisa referenciar a issue #${number} da branch (Refs #${number})."
+            printf '%s' "$BODY" | grep -q '^## Validação' \
+              || fail "A descrição precisa da seção '## Validação' do template."
+          }
+
+          needs_scope() {
+            [ -n "${BODY// }" ] || fail "Descrição vazia: liste as issues incluídas."
+            printf '%s' "$BODY" | grep -Eq '#[0-9]+' \
+              || fail "PR de promoção ou release precisa listar as issues incluídas (#número)."
+            printf '%s' "$BODY" | grep -q '^## Validação' \
+              || fail "A descrição precisa da seção '## Validação'."
+          }
+
+          echo "PR: ${HEAD} → ${BASE} (${HEAD_REPO})"
+
+          case "$BASE" in
+            dev)
+              if $same_repo && [[ "$HEAD" == "main" || "$HEAD" == "homolog" ]]; then
+                ok "Sincronização ${HEAD} → dev."
+              elif [[ "$HEAD" =~ $work_re ]]; then
+                needs_issue "${BASH_REMATCH[2]}"; ok "Implementação → dev."
+              elif [[ "$HEAD" =~ $hotfix_re ]]; then
+                needs_issue "${BASH_REMATCH[1]}"; ok "Propagação de hotfix → dev."
+              fi
+              ;;
+            homolog)
+              if $same_repo && [ "$HEAD" = "dev" ]; then
+                needs_scope; ok "Promoção dev → homolog."
+              elif $same_repo && [ "$HEAD" = "main" ]; then
+                ok "Sincronização main → homolog."
+              elif [[ "$HEAD" =~ $homolog_fix_re ]]; then
+                needs_issue "${BASH_REMATCH[1]}"; ok "Correção de homologação → homolog."
+              elif [[ "$HEAD" =~ $hotfix_re ]]; then
+                needs_issue "${BASH_REMATCH[1]}"; ok "Propagação de hotfix → homolog."
+              fi
+              ;;
+            main)
+              if $same_repo && [ "$HEAD" = "homolog" ]; then
+                needs_scope; ok "Release homolog → main."
+              elif [[ "$HEAD" =~ $hotfix_re ]]; then
+                needs_issue "${BASH_REMATCH[1]}"; ok "Hotfix → main."
+              fi
+              ;;
+          esac
+
+          fail "Combinação não permitida: ${HEAD} → ${BASE}."
