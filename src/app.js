@@ -18,6 +18,11 @@ function criarApp({ logger }) {
         res.setHeader('X-Request-Id', id);
         return id;
       },
+      // Registra só o necessário para rastrear a requisição, sem headers nem corpo.
+      serializers: {
+        req: (req) => ({ id: req.id, method: req.method, url: req.url }),
+        res: (res) => ({ statusCode: res.statusCode }),
+      },
     }),
   );
   app.use(helmet());
